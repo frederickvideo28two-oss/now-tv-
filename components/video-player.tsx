@@ -10,6 +10,8 @@ import {
   ChevronRight,
   Loader2,
   Maximize,
+  RotateCcw,
+  RotateCw,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -29,6 +31,8 @@ interface VideoPlayerProps {
   onPrev: () => void
   onNext: () => void
 }
+
+const SKIP_SECONDS = 10
 
 export function VideoPlayer({
   channel,
@@ -52,6 +56,8 @@ export function VideoPlayer({
   const [showAudioMenu, setShowAudioMenu] = useState(false)
   const [showSubMenu, setShowSubMenu] = useState(false)
 
+  const isVod = channel?.kind === 'vod'
+
   useEffect(() => {
     const video = videoRef.current
     if (!video || !channel) return
@@ -63,8 +69,11 @@ export function VideoPlayer({
     setCurrentAudio(-1)
     setCurrentSub(-1)
 
+    const vod = channel.kind === 'vod'
     const src = resolveStreamUrl(channel.url, useProxy)
-    const isHls = /\.m3u8($|\?)/i.test(channel.url) || channel.kind === 'live'
+    const isHls =
+      /\.m3u8($|\?)/i.test(channel.url) ||
+      (channel.kind === 'live' && !/\.(mp4|mkv|avi|mov|webm|flv)($|\?)/i.test(channel.url))
 
     // Clean up any previous hls.js instance.
     if (hlsRef.current) {
@@ -74,19 +83,26 @@ export function VideoPlayer({
 
     function onCanPlay() {
       setLoading(false)
-      void video?.play().catch(() => {})
+      // Autoplay only makes sense for live; let VOD wait for the user.
+      if (!vod) void video?.play().catch(() => {})
     }
     video.addEventListener('canplay', onCanPlay)
 
     if (isHls && Hls.isSupported()) {
-      const hls = new Hls({ enableWorker: true, lowLatencyMode: true })
+      const hls = new Hls({
+        enableWorker: true,
+        // Low-latency mode is only for live; on VOD it breaks seeking.
+        lowLatencyMode: !vod,
+        // Keep a large back buffer for VOD so rewinding works.
+        backBufferLength: vod ? Infinity : 90,
+      })
       hlsRef.current = hls
       hls.loadSource(src)
       hls.attachMedia(video)
 
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
         setLoading(false)
-        void video.play().catch(() => {})
+        if (!vod) void video.play().catch(() => {})
       })
 
       hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, () => {
@@ -118,7 +134,7 @@ export function VideoPlayer({
               hls.recoverMediaError()
               break
             default:
-              setError('No se pudo reproducir este canal.')
+              setError('No se pudo reproducir este contenido.')
               setLoading(false)
               hls.destroy()
               hlsRef.current = null
@@ -134,7 +150,11 @@ export function VideoPlayer({
     }
 
     function onVideoError() {
-      setError('No se pudo reproducir este canal.')
+      setError(
+        vod
+          ? 'No se pudo reproducir este contenido. Puede que el formato o el códec no sean compatibles con el navegador.'
+          : 'No se pudo reproducir este canal.',
+      )
       setLoading(false)
     }
     video.addEventListener('error', onVideoError)
@@ -150,6 +170,32 @@ export function VideoPlayer({
       video.load()
     }
   }, [channel, useProxy])
+
+  function skip(delta: number) {
+    const video = videoRef.current
+    if (!video) return
+    const duration = Number.isFinite(video.duration) ? video.duration : Infinity
+    const next = Math.min(Math.max(0, video.currentTime + delta), duration)
+    video.currentTime = next
+  }
+
+  // Keyboard arrows for seeking VOD content.
+  useEffect(() => {
+    if (!isVod) return
+    function onKey(e: KeyboardEvent) {
+      const target = e.target as HTMLElement | null
+      if (target && /^(INPUT|TEXTAREA)$/.test(target.tagName)) return
+      if (e.key === 'ArrowRight') {
+        e.preventDefault()
+        skip(SKIP_SECONDS)
+      } else if (e.key === 'ArrowLeft') {
+        e.preventDefault()
+        skip(-SKIP_SECONDS)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [isVod])
 
   function selectAudio(id: number) {
     if (hlsRef.current) hlsRef.current.audioTrack = id
@@ -205,11 +251,11 @@ export function VideoPlayer({
         ) : null}
 
         {error ? (
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/70 text-center">
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/70 p-4 text-center">
             <AlertTriangle className="h-8 w-8 text-destructive" />
             <p className="text-sm text-foreground">{error}</p>
             <p className="text-xs text-muted-foreground">
-              Prueba a activar el proxy o elige otro canal.
+              Prueba a activar el proxy o elige otro contenido.
             </p>
           </div>
         ) : null}
@@ -222,8 +268,8 @@ export function VideoPlayer({
             size="icon"
             onClick={onPrev}
             disabled={!hasPrev}
-            title="Canal anterior"
-            aria-label="Canal anterior"
+            title="Anterior"
+            aria-label="Anterior"
           >
             <ChevronLeft className="h-4 w-4" />
           </Button>
@@ -232,11 +278,35 @@ export function VideoPlayer({
             size="icon"
             onClick={onNext}
             disabled={!hasNext}
-            title="Canal siguiente"
-            aria-label="Canal siguiente"
+            title="Siguiente"
+            aria-label="Siguiente"
           >
             <ChevronRight className="h-4 w-4" />
           </Button>
+
+          {isVod ? (
+            <>
+              <Button
+                variant="secondary"
+                size="icon"
+                onClick={() => skip(-SKIP_SECONDS)}
+                title={`Retroceder ${SKIP_SECONDS}s`}
+                aria-label={`Retroceder ${SKIP_SECONDS} segundos`}
+              >
+                <RotateCcw className="h-4 w-4" />
+              </Button>
+              <Button
+                variant="secondary"
+                size="icon"
+                onClick={() => skip(SKIP_SECONDS)}
+                title={`Adelantar ${SKIP_SECONDS}s`}
+                aria-label={`Adelantar ${SKIP_SECONDS} segundos`}
+              >
+                <RotateCw className="h-4 w-4" />
+              </Button>
+            </>
+          ) : null}
+
           <div className="min-w-0">
             <p className="truncate text-sm font-semibold text-foreground">
               {channel?.name ?? 'Sin canal'}
